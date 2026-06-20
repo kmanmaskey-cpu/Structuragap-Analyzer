@@ -36,11 +36,11 @@ import math
 
 
 # Define and create your clean results folder
-output_folder =r"C:\ML PROJECTS\InfraScan-Sentinel\audited_results"
+output_folder =r"C:\ML PROJECTS\Structuragap Analyzer\audited_results"
 os.makedirs(output_folder, exist_ok=True)
 
 register_heif_opener()
-dataset = r'C:\ML PROJECTS\InfraScan-Sentinel\dataset'
+dataset = r'C:\ML PROJECTS\Structuragap Analyzer\dataset'
 for filename in os.listdir(dataset):
     if filename.upper().endswith('.HEIC'):
         img = Image.open(os.path.join(dataset,filename))
@@ -48,8 +48,8 @@ for filename in os.listdir(dataset):
         #img.convert('RGB').save(os.path.join(dataset,new_file),'JPEG')
 
 
-image_paths = glob.glob('C:\\ML PROJECTS\\InfraScan-Sentinel\\dataset\\*.JPG')
-path1 =glob.glob('C:\\ML PROJECTS\\InfraScan-Sentinel\\dataset\\*IMG_5064.JPG')
+image_paths = glob.glob('C:\\ML PROJECTS\\Structuragap Analyzer\\dataset\\*.JPG')
+path1 =glob.glob('C:\\ML PROJECTS\\Structuragap Analyzer\\dataset\\IMG_5064.JPG')
 
 midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
 midas.eval()
@@ -59,6 +59,41 @@ midas.to(device)
 transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
 transform = transforms.small_transform
 
+def get_scale_factor(original_width):
+    """Calculates the ratio needed to get from Original to Target."""
+    Target_width = 1000
+    return Target_width/ original_width
+def get_calibration_scale(image, paper_width_cm=21.0):
+    """
+    1. Resizes image to TARGET_WIDTH for display.
+    2. Lets you select ROI on the resized image.
+    3. Restores ROI width to Original scale to calculate accurate cm/pixel.
+    """
+    Target_width=1000
+    h, w = image.shape[:2]
+    scale_factor = get_scale_factor(w)
+    new_h = int(h * scale_factor)
+    
+    # Resize for display
+    display_img = cv2.resize(image, (Target_width, new_h))
+    
+    # Interaction
+    print("Draw a box around the A4 paper. Press ENTER when done.")
+    roi = cv2.selectROI("Calibration", display_img, fromCenter=False, showCrosshair=True)
+    cv2.destroyWindow("Calibration")
+    
+    # Math: Convert display ROI back to original resolution
+    roi_width_display = roi[2]
+    if roi_width_display <= 0:
+        raise ValueError("Invalid ROI selected.")
+        
+    # 'roi_width_original' is the real width on the original photo
+    roi_width_original = roi_width_display / scale_factor
+    
+    cm_per_pixel = paper_width_cm / roi_width_original
+    print(f"Calibration Successful! Scale: {cm_per_pixel:.5f} cm/pixel")
+    
+    return cm_per_pixel
 
 def min_gap(h1,h2):
     seismic_gap=((0.025*h1)+(0.025*h2))*100
@@ -74,21 +109,28 @@ def process_image(image_path):
     horizontal_y_positions = []
     h1=12    #HARDCODED#
     h2=9   
+    Target_width=1000
 
 
 
     # 1. Load your building photo
     image = cv2.imread(image_path)
-    width = math.ceil(image.shape[1]*0.5)
-    height=math.ceil(image.shape[0]*0.5)
-    dimensions = (width,height)
-    image = cv2.resize(image,dimensions,interpolation=cv2.INTER_AREA)
 
-
-    image 
     if image is None:
         print(f"Could not load: {image_path}")
         return
+    
+    cm_per_pixel = get_calibration_scale(image)
+    h, w = image.shape[:2]
+    width = math.ceil(image.shape[1]*0.5)
+    height=math.ceil(image.shape[0]*0.5)
+    dimensions = (width,height)
+    scale_factor = Target_width/ w
+
+    new_h = int(h * scale_factor)
+    image = cv2.resize(image, (Target_width, new_h), interpolation=cv2.INTER_AREA)
+
+    
     # 2. Convert to Grayscale
     RGB = cv2.cvtColor(image,cv2.COLOR_BGRA2RGB)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -152,7 +194,7 @@ def process_image(image_path):
         left_idx = int(depth_left_edge / x_scale)
         right_idx = int(depth_right_edge / x_scale)
         gap_sharpness = np.mean(depth_gradient[left_idx:right_idx])
-        scale_factor = 2 #hardcoded
+    
         gap_sharpness_normalized = 1 / (1 + np.exp(-gap_sharpness/ scale_factor))
         print('The average sharpness of the image is ',gap_sharpness_normalized)
 
@@ -160,8 +202,7 @@ def process_image(image_path):
 
     # 3. Use Canny Edge Detection
     # This finds the "lines" between the buildings
-    edges = cv2.Canny(gray, 30,10 0)
-
+    edges = cv2.Canny(gray, 30,100)
     lines = cv2.HoughLinesP(
         edges, 
         rho=1,            # Distance resolution in pixels (usually 1)
@@ -176,7 +217,7 @@ def process_image(image_path):
     
     mid = image.shape[1]//2
 
-    cm_per_pixel = 1.0  # Default: 1 pixel = 1 cm
+      # Default: 1 pixel = 1 cm
     print("LINES:", len(lines) if lines is not None else 0)
    
 
@@ -365,6 +406,7 @@ def process_image(image_path):
         print(x_valid_left)
         print(x_valid_right)
         print(best_gaps)
+        print(cm_per_pixel)
                         
    
 
@@ -409,7 +451,7 @@ def process_image(image_path):
             
             # 4. Use this refined pixel size for the final math
             known_siding_cm = 10.16
-            cm_per_pixel = known_siding_cm / (optimal_pixel_gap + 1e-7)  #to be used in calibration ayer
+            #cm_per_pixel = known_siding_cm / (optimal_pixel_gap + 1e-7)  #to be used in calibration ayer
 
 
         
@@ -423,7 +465,7 @@ def process_image(image_path):
             known_siding_cm = 10.16 
             
             # The Magic Formula: Scale = Real World / Pixels
-            cm_per_pixel = known_siding_cm / (avg_pixel_gap + 1e-7)  # Add small value to prevent division by zero
+            #cm_per_pixel = known_siding_cm / (avg_pixel_gap + 1e-7)  # Add small value to prevent division by zero
             print(f"AUTOMATED SCALE: {cm_per_pixel:.4f} cm/pixel")
     
     inner_left_edge = x_valid_left
@@ -450,17 +492,18 @@ def process_image(image_path):
         
         # 1. THE MATH: Use the variables created by your histogram blocks
         pixel_gap = fused_right - fused_left
+        pixel_gap_original = pixel_gap/scale_factor
         
         assumed_distance_cm = 300
         try:
             focal_length_px = get_focal_length_pixels(image_path)
             print(focal_length_px)
         except:
-            focal_length_px =2800 # reasonable smartphone default
+            focal_length_px =2900 # reasonable smartphone default
         raw_calculated_gap= (pixel_gap * assumed_distance_cm) / focal_length_px
         calibration_multiplier = 2.3  # <-- CHANGE THIS based on your one-shot test photo!
         
-        real_world_gap = raw_calculated_gap * calibration_multiplier
+        real_world_gap = pixel_gap_original * cm_per_pixel
         print(f"Corrected Real World Gap: {real_world_gap:.2f} cm")
         #real_world_gap=(pixel_gap * callibration)
         if real_world_gap <min_gap(h1,h2):  # If the gap is less than 10 cm, we consider it a "collision risk"
@@ -516,6 +559,7 @@ def process_image(image_path):
         print(f"Gap data points found: {len(gap_data)}")
         print(f"Horizontal lines found: {len(horizontal_y_positions)}")
         print(f"Valid gaps found: {len(valid_gaps)}")
+        print('cm per pixel',cm_per_pixel)
     
 
     
