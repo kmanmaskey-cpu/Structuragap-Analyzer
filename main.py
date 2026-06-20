@@ -10,12 +10,15 @@
 #   - EXIF focal length extraction ✓
 #   - Physics-based scale formula ✓
 #   - Batch processing on multiple images ✓
-#   - Tested on 20-30 real Nepali images ✓
+#   - Tested on 10 images
 # Known issues:
 #   - Assumed distance fixed at 500cm (needs ground truth)
 # Next task: Collect ground truth data at Swayambhu
 #            with tape measure + proper building gap photos
 # ============================================
+import ssl
+import sys
+ssl._create_default_https_context = ssl._create_unverified_context
 import cv2
 import numpy as np
 import torch
@@ -30,17 +33,23 @@ from pillow_heif import register_heif_opener
 import os
 import math
 
+
+
+# Define and create your clean results folder
+output_folder =r"C:\ML PROJECTS\InfraScan-Sentinel\audited_results"
+os.makedirs(output_folder, exist_ok=True)
+
 register_heif_opener()
 dataset = r'C:\ML PROJECTS\InfraScan-Sentinel\dataset'
 for filename in os.listdir(dataset):
     if filename.upper().endswith('.HEIC'):
         img = Image.open(os.path.join(dataset,filename))
         new_file = os.path.splitext(filename)[0]+'.JPG'
-        img.convert('RGB').save(os.path.join(dataset,new_file),'JPEG')
+        #img.convert('RGB').save(os.path.join(dataset,new_file),'JPEG')
 
 
 image_paths = glob.glob('C:\\ML PROJECTS\\InfraScan-Sentinel\\dataset\\*.JPG')
-path1 =glob.glob('C:\\ML PROJECTS\\InfraScan-Sentinel\\dataset\\*IMG_5047.JPG')
+path1 =glob.glob('C:\\ML PROJECTS\\InfraScan-Sentinel\\dataset\\*IMG_5064.JPG')
 
 midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
 midas.eval()
@@ -92,6 +101,7 @@ def process_image(image_path):
 
 
     depth_map = prediction.cpu().numpy()
+    depth_height,depth_width = depth_map.shape
     print(depth_map.shape[0])
     h = depth_map.shape[0]
     middle_row = depth_map[h//2]
@@ -102,7 +112,7 @@ def process_image(image_path):
 
     depth_gradient = np.abs(np.gradient(middle_row))
 
-    threshold = np.percentile(depth_gradient, 90)  # top 10% strongest edges
+    threshold = np.percentile(depth_gradient, 80)  # top 10% strongest edges
     edge_pixels_depth = np.where(depth_gradient > threshold)[0]
 
     edge_pixels_original = edge_pixels_depth * x_scale
@@ -150,14 +160,14 @@ def process_image(image_path):
 
     # 3. Use Canny Edge Detection
     # This finds the "lines" between the buildings
-    edges = cv2.Canny(gray, 30, 100)
+    edges = cv2.Canny(gray, 30,10 0)
 
     lines = cv2.HoughLinesP(
         edges, 
         rho=1,            # Distance resolution in pixels (usually 1)
         theta=np.pi/180,  # Angle resolution in radians (1 degree)
         threshold=45,  # Minimum 'votes' to be considered a line
-        minLineLength=30,# Minimum length of line in pixels
+        minLineLength=20,# Minimum length of line in pixels
         maxLineGap=100 # Max gap between points to link them
     )
 
@@ -175,76 +185,186 @@ def process_image(image_path):
     # 3. Draw the lines back onto the original image
     if lines is not None:
 
-              
-        length_coordinates_List = []
-        left=[]
-        right=[]
-        for line in lines:
-            
-            x1, y1, x2, y2 = line[0]
+        def detect_candidate_lines(lines):  
+            length_coordinates_List = []
+            left=[]
+            right=[]
+            line_data =[]
+            valid_lines=[]
+            angles=[]
+            for line in lines:
+                
+                x1, y1, x2, y2 = line[0]
 
-            
-            # 1. Calculate the angle of the line
-            # arctan2 returns radians, we convert to degrees
-            angle = (np.abs(np.degrees(np.arctan2(y2 - y1, x2 - x1))))
+                
+                # 1. Calculate the angle of the line
+                # arctan2 returns radians, we convert to degrees
+                angle = (np.abs(np.degrees(np.arctan2(y2 - y1, x2 - x1))))
+                angles.append(angle)
 
 
-            #print("ANGLE:", angle)
-            
-            # 2. The Vertical Filter 
-            # We only want lines between 70 and 110 degrees
-            if 75 < angle < 120:
-                #Use distance formula
-                length_of_lines = math.sqrt((x2-x1)**2+(y2-y1)**2)
-                length_coordinates = {'x1':x1,'y1':y1,'x2':x2,'y2':y2,'length_of_lines':length_of_lines}
-                length_coordinates_List.append(length_coordinates)
-            print(angle)
+                #print("ANGLE:", angle)
+                
+                # 2. The Vertical Filter 
+                # We only want lines between 70 and 110 degrees
+                if 65 < angle < 105:
 
-        
-      
-        best_gaps=10**34
-        x_valid_left = 0
-        x_valid_right = 0
-        for items in length_coordinates_List:
-            midpoint = (items['x1']+items['x2'])/2
-            if midpoint<mid:
-                left.append(items)
-            elif midpoint>mid:
-                right.append(items)
-        if not left or not right:
-            print("Hough failed: one side empty")
-            return
-        for l in left:   #finding the midpoint 
-            x_l  = (l['x1'] + l['x2']) / 2
-            xl = int(x_l)
-            x_left_depth = int(xl/x_scale)
-            for r in right:
-                x_r = int((r['x1'] + r['x2']) / 2)
-                xr =int(x_r)
-                x_right_depth = int(xr/x_scale)
-                if x_left_depth >= x_right_depth:
-                    continue
-                else:
-                    w=20
-                    if x_left_depth - w < 0 or x_right_depth + w > depth_map.shape[1]:
+                    #Use distance formula
+                    length_of_lines = math.sqrt((x2-x1)**2+(y2-y1)**2)
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    px = -dy
+                    py = dx
+                    length = math.sqrt((px)**2+(py)**2)
+                    if length == 0:
                         continue
                     else:
+                        px_norm = px/length
+                        py_norm = py/length
+
                     
-                        depth_left_2  = np.mean(depth_map[:, x_left_depth-w : x_left_depth])
-                        depth_gap_2   = np.mean(depth_map[:, x_left_depth : x_right_depth])
-                        depth_right_2 = np.mean(depth_map[:, x_right_depth: x_right_depth+w])
+                    length_coordinates = {'x1':x1,'y1':y1,'x2':x2,'y2':y2,'length_of_lines':length_of_lines,'dx':dx,'dy':dy,'px':px,'py':py,'px_norm':px_norm,'py_norm':py_norm}
+                    
+                    length_coordinates_List.append(length_coordinates)
+            return length_coordinates_List,angles
+        length_coordinates_List,angles = detect_candidate_lines(lines)
+
+        print(angles)
+        valid_lines = []
+        d=5
+        
+        def validate_line(line, depth_map, x_scale, y_scale, depth_width, depth_height):
+
+            
+            x1 = line['x1']
+            x2 = line['x2']
+            y1 = line['y1']
+            y2 = line['y2']
+            px_norm = line['px_norm']
+            py_norm = line['py_norm']
+            N=5
+            Deltas = []
+
+            for i in range(N):
+
+            
+                t = i / (N - 1)
+                x = x1+t*(x2-x1)
+                y = y1+t*(y2-y1)
+
+
+
+                x_L = (x + d * px_norm)/x_scale
+                y_L = (y + d * py_norm)/y_scale
+
+                x_R = (x - d * px_norm)/x_scale
+                y_R = (y - d * py_norm)/y_scale
+                if 0<=x_L<depth_width and 0<=x_R<depth_width and 0<=y_L<depth_height and 0<=y_R<depth_height:
+                    x_L, y_L, x_R, y_R = int(x_L), int(y_L), int(x_R), int(y_R)
+
+
+                    D_L = depth_map[y_L, x_L]
+                    D_R = depth_map[y_R, x_R]
+
+
+
+                    delta = abs(D_L - D_R)
+                    Deltas.append(delta)
+
+                else:
+                    continue
+
+            if len(Deltas)>3:
+            
+                filtered_deltas=[]
+                median = np.median(Deltas)
+                print('medians,',median)
+                threshold_min =0.5
+                if median < threshold_min:
+                    return False, None, None
+                else:
+            
+                    for j in Deltas:
+                        tolerance = 0.3
+                        if (abs(j-median))/(median+10**-23)<tolerance:
+                    
+
+                            filtered_deltas.append(j)
+                            
+                            
+                        else:
+                            print('hello')
+                            continue
+                
+                ratio = len(filtered_deltas)/len(Deltas)
+
+            elif len(Deltas)<=3:
+                return False, None, None
+            
+
+        
+        
+            if ratio is not None and ratio > 0.7:
+                return True,ratio,median
+            else:
+                return False,ratio,median
+        for line in length_coordinates_List:
+            is_valid, ratio,median = validate_line(line, depth_map, x_scale, y_scale, depth_width, depth_height)
+
+            if is_valid:
+                valid_lines.append(line)
+        
+
+
+
+
+            
+        
+        def find_best_pair(valid_lines, mid, x_scale, depth_map):
+            best_gaps = float('inf')
+            x_valid_left = None
+        
+            x_valid_right = None
+            for items in valid_lines:
+                midpoint = (items['x1']+items['x2'])/2
+                if midpoint<mid:
+                    left.append(items)
+                elif midpoint>mid:
+                    right.append(items)
+            if not left or not right:
+                print("Hough failed: one side empty")
+                return None,None,None
+            for l in left:   #finding the midpoint 
+                x_l  =(l['x1']+l['x2'])/2
+                xl = int(x_l)
+                x_left_depth = int(xl/x_scale)
+                for r in right:
+                    x_r =(r['x1']+r['x2'])/2
+                    xr =int(x_r)
+                    x_right_depth = int(xr/x_scale)
+                    if x_left_depth >= x_right_depth:
+                        continue
+                    w=10
+                    if x_left_depth - w < 0 or x_right_depth + w > depth_map.shape[1]:
+                            continue
+                        
+                    depth_left_2  = np.mean(depth_map[:, x_left_depth-w : x_left_depth])
+                    depth_gap_2   = np.mean(depth_map[:, x_left_depth : x_right_depth])
+                    depth_right_2 = np.mean(depth_map[:, x_right_depth: x_right_depth+w])
                     if depth_gap_2 > depth_left_2 and depth_gap_2 > depth_right_2:
                         gap = abs(xl-xr)
                         if gap<best_gaps:
                             best_gaps=gap
                             x_valid_left = xl
                             x_valid_right = xr
+                            
+            return x_valid_left, x_valid_right, best_gaps
 
-                    else:
-                        continue
-    print(x_valid_left)
-    print(x_valid_right)
-    print(best_gaps)
+                        
+        x_valid_left, x_valid_right, best_gaps = find_best_pair(valid_lines, mid, x_scale, depth_map)
+        print(x_valid_left)
+        print(x_valid_right)
+        print(best_gaps)
                         
    
 
@@ -331,12 +451,18 @@ def process_image(image_path):
         # 1. THE MATH: Use the variables created by your histogram blocks
         pixel_gap = fused_right - fused_left
         
-        assumed_distance_cm = 500
+        assumed_distance_cm = 300
         try:
             focal_length_px = get_focal_length_pixels(image_path)
+            print(focal_length_px)
         except:
-            focal_length_px = 2500  # reasonable smartphone default
-        real_world_gap = (pixel_gap * assumed_distance_cm) / focal_length_px
+            focal_length_px =2800 # reasonable smartphone default
+        raw_calculated_gap= (pixel_gap * assumed_distance_cm) / focal_length_px
+        calibration_multiplier = 2.3  # <-- CHANGE THIS based on your one-shot test photo!
+        
+        real_world_gap = raw_calculated_gap * calibration_multiplier
+        print(f"Corrected Real World Gap: {real_world_gap:.2f} cm")
+        #real_world_gap=(pixel_gap * callibration)
         if real_world_gap <min_gap(h1,h2):  # If the gap is less than 10 cm, we consider it a "collision risk"
             status = "WARNING: Collision Risk Detected!"
             color = (0, 0, 255)  # Red
@@ -347,40 +473,49 @@ def process_image(image_path):
         # 2. THE DRAWING: Visualizing the measurement
         y_mid = image.shape[0] // 2
         
+        # 1. Create your clean duplicate canvas
+        annotated_img = image.copy()
         
+        # 2. DRAW TARGET FIXED: Notice everything now draws on 'annotated_img'
+        cv2.line(annotated_img, (int(fused_left), y_mid), (int(fused_right), y_mid), color, 5)
         
-        # 1. Draw the dynamic bridge (Red if dangerous, Green if safe)
-        print(f"Hough left edge: {inner_left_edge}")
-        cv2.line(image, (int(fused_left), y_mid), (int(fused_right), y_mid), color, 5)
-        
-        # 2. Show the primary measurement (CM) at the top
-        cv2.putText(image, f"GAP: {real_world_gap:.1f}cm", (int(fused_left), y_mid - 40), 
+        cv2.putText(annotated_img, f"GAP: {real_world_gap:.1f}cm", (int(fused_left), y_mid - 40), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)  
 
-        # 3. Show the Status Verdict slightly below it
-        cv2.putText(image, status, (int(fused_left), y_mid - 15), 
+        cv2.putText(annotated_img, status, (int(fused_left), y_mid - 15), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         confidence = int(gap_sharpness_normalized * 100)
-        cv2.putText(image, f"CONFIDENCE: {confidence}% (sharpness={gap_sharpness_normalized:.2f})", 
-                (int(fused_left), y_mid - 65),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        cv2.putText(annotated_img, f"CONFIDENCE: {confidence}%", 
+                    (int(fused_left), y_mid - 65),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        
+        # 3. FIX VARIABLE CLASH: Get distinct values for your image dimensions
+        img_h, img_w = annotated_img.shape[:2]
+        
+        # 4. Save the marked-up copy dynamically with its original filename
+        base_name = os.path.basename(image_path)
+        save_path = os.path.join(output_folder, f"audited_{base_name}")
+        cv2.imwrite(save_path, annotated_img)
 
         print(f"REFINED Detected Gap: {pixel_gap:.2f} pixels")
         print(f"REFINED Estimated Real-World Gap: {real_world_gap:.2f} cm")
-        cv2.imshow('InfraScan Sentinel - Seismic Audit', image)
+        
+        # 5. FIXED WINDOW SCALING: Using 'img_h' and 'img_w' to avoid the 'w=20' bug
+        cv2.namedWindow('NBC ClearMetric - Structural Preview', cv2.WINDOW_NORMAL)
+        display_width = 900  
+        display_height = int(img_h * (display_width / img_w))  # Ratio remains perfect!
+
+        cv2.resizeWindow('NBC ClearMetric - Structural Preview', display_width, display_height)
+
+        # 6. Show the processed image to the judges
+        cv2.imshow('NBC ClearMetric - Structural Preview', annotated_img)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
-    
-
+        
         print(f"Gap data points found: {len(gap_data)}")
         print(f"Horizontal lines found: {len(horizontal_y_positions)}")
         print(f"Valid gaps found: {len(valid_gaps)}")
-            
-
-    output_path = image_path.replace('.jpg', '_result.jpg')
-    cv2.imwrite(output_path, image)
-    print(f"Saved result to: {output_path}")
     
 
     
